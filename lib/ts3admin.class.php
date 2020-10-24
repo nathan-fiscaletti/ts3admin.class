@@ -49,7 +49,7 @@ class ts3admin {
   *
   * @author     Stefan Zehnpfennig
   */
-	private $runtime = array('socket' => '', 'selected' => false, 'host' => '', 'queryport' => '10011', 'timeout' => 2, 'debug' => array(), 'fileSocket' => '', 'bot_clid' => '', 'bot_name' => '');
+	private $runtime = array('socket' => '', 'selected' => false, 'host' => '', 'queryport' => '10011', 'bindaddress' => '0.0.0.0', 'bindport' => 0, 'timeout' => 2, 'debug' => array(), 'fileSocket' => '', 'bot_clid' => '', 'bot_name' => '');
 
 //*******************************************************************************************	
 //*************************************** Constants *****************************************
@@ -3229,8 +3229,8 @@ class ts3admin {
   */
 	private function quit() {
 		$this->logout();
-		@fputs($this->runtime['socket'], "quit\n");
-		@fclose($this->runtime['socket']);
+		@socket_write($this->runtime['socket'], "quit\n");
+		@socket_close($this->runtime['socket']);
 	}
 /**
   * loadQueryData
@@ -4547,16 +4547,20 @@ class ts3admin {
  * Note: When specifying a numerical IPv6 address (e.g. fe80::1), you must enclose the IP in square brackets—for example, [fe80::1]
  * 
  * @author	Stefan Zehnpfennig
- * @param	string	$host		ts3host
- * @param	integer	$queryport	ts3queryport
- * @param	integer	$timeout	socket timeout (default = 2) [optional]
+ * @param	string	$host		 ts3host
+ * @param	integer	$queryport	 ts3queryport
+ * @param   string  $bindaddress host to bind to (default 0.0.0.0)
+ * @param   string  $bindport    port to bind to (default 0)
+ * @param	integer	$timeout	 socket timeout (default = 2) [optional]
  * @return	void
 */
-	function __construct($host, $queryport, $timeout = 2) {
+	function __construct($host, $queryport, $bindaddress = "0.0.0.0", $bindport = 0, $timeout = 2) {
 		if($queryport >= 1 and $queryport <= 65536) {
 			if($timeout >= 1) {
-				$this->runtime['host'] = $host;
-				$this->runtime['queryport'] = $queryport;
+                $this->runtime['host'] = $host;
+                $this->runtime['queryport'] = $queryport;
+                $this->runtime['bindaddress'] = $bindaddress;
+                $this->runtime['bindport'] = $bindport;
 				$this->runtime['timeout'] = $timeout;
 			}else{
 				$this->addDebugLog('invalid timeout value');
@@ -4690,27 +4694,45 @@ class ts3admin {
 			return $this->generateOutput(false, array('Error: the script is already connected!'), false);
 		}
 		
-		$socket = @fsockopen($this->runtime['host'], $this->runtime['queryport'], $errnum, $errstr, $this->runtime['timeout']);
+		$socket = @socket_create(AF_INET, SOCK_STREAM, SOL_TCP);
+        if (! $socket) {
+            $errnum = socket_last_error();
+            $errstr = socket_strerror($errnum);
+            $this->addDebugLog('Error: socket create failed');
+            return $this->generateOutput(false, array('Error: socket create failed!', 'Error: '.$errstr), false);
+        }
 
-		if(!$socket)
-		{
-			$this->addDebugLog('Error: connection failed!');
-			return $this->generateOutput(false, array('Error: connection failed!', 'Server returns: '.$errstr), false);
-		}
-		else
-		{
-			if(strpos(fgets($socket), 'TS3') !== false)
-			{
-				$tmpVar = fgets($socket);
-				$this->runtime['socket'] = $socket;
-				return $this->generateOutput(true, array(), true);
-			}
-			else
-			{
-				$this->addDebugLog('host isn\'t a ts3 instance!');
-				return $this->generateOutput(false, array('Error: host isn\'t a ts3 instance!'), false);
-			}
-		}
+        // Set timeout
+        socket_set_option($socket, SOL_SOCKET, SO_RCVTIMEO, array('sec' => $this->runtime['timeout'], 'usec' => 0));
+        socket_set_option($socket, SOL_SOCKET, SO_SNDTIMEO, array('sec' => $this->runtime['timeout'], 'usec' => 0));
+
+        try {
+            $bind = socket_bind($socket, (empty($this->runtime['bindaddress'])) ? '0.0.0.0' : $this->runtime['bindaddress'], (empty($this->runtime['bindport'])) ? 0 : $this->runtime['bindport']);
+            if (! $bind) {
+                $this->addDebugLog('counldn\'t bind to outbount host.');
+                return $this->generateOutput(false, array('Error: coundn\'t bind to outbound host'), false);
+            }
+        } catch (\Exception $e) {
+            $this->addDebugLog('counldn\'t bind to outbount host.');
+            return $this->generateOutput(false, array('Error: coundn\'t bind to outbound host'), false);
+        }
+
+        $connect = @socket_connect($socket, $this->runtime['host'], $this->runtime['queryport']);
+        if (! $connect) {
+            $errnum = socket_last_error();
+            $errstr = socket_strerror($errnum);
+            $this->addDebugLog('Error: connection failed!');
+            return $this->generateOutput(false, array('Error: connection failed!', 'Server returns: '.$errstr), false);
+        }
+
+        if (mb_strpos(socket_read($socket, 4096), 'TS3') === false) {
+            $this->addDebugLog('host isn\'t a ts3 instance!');
+            return $this->generateOutput(false, array('Error: host isn\'t a ts3 instance!'), false);
+        }
+
+        $tmpVar = socket_read($socket, 4096);
+        $this->runtime['socket'] = $socket;
+        return $this->generateOutput(true, array(), true);
 	}
 
 /**
@@ -4751,7 +4773,7 @@ class ts3admin {
 		
 		foreach($splittedCommand as $commandPart)
 		{
-			if(!(@fputs($this->runtime['socket'], $commandPart)))
+			if(!(@socket_write($this->runtime['socket'], $commandPart)))
 			{
 				$this->runtime['socket'] = $this->runtime['bot_clid'] = '';
 				$this->addDebugLog('Socket closed.', $tracert[1]['function'], $tracert[0]['line']);
@@ -4759,7 +4781,7 @@ class ts3admin {
 			}
 		}
 		do {
-			$data .= @fgets($this->runtime['socket'], 4096);
+			$data .= @socket_read($this->runtime['socket'], 4096);
 			
 			if(empty($data))
 			{
@@ -4847,7 +4869,7 @@ class ts3admin {
 		
 		$this->executeCommand("servernotifyregister event=$type" . ($cid != -1 ? " id=$cid" : "") , null);
 		
-		$data = fgets($this->runtime['socket'], 4096);
+		$data = socket_read($this->runtime['socket'], 4096);
 		
 		if(!empty($data))
 		{		
